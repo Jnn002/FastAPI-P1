@@ -1,9 +1,10 @@
 [project]
 name = "fastapi_p1"
-version = "0.1.0"
+version = "0.2.0"
 description = "FastAPI Adventure"
 requires-python = ">=3.13"
 dependencies = [
+    "alembic>=1.14.0",
     "asyncpg>=0.30.0",
     "fastapi[standard]>=0.115.6",
     "pydantic-settings>=2.7.1",
