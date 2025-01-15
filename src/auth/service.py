@@ -1,18 +1,21 @@
 from sqlmodel import select
 from sqlmodel.ext.asyncio.session import AsyncSession
 
-from .models import User
+from src.db.models import User
+
 from .schemas import UserCreateModel
 from .utils import generate_password_hash
 
 
 class UserService:
     async def get_user_by_email(self, email: str, session: AsyncSession):
+        # SELECT * FROM user WHERE email = email
         statement = select(User).where(User.email == email)
 
         result = await session.exec(statement)
 
         user = result.first()
+        # devolver el usuario
         return user
 
     async def user_exists(self, email: str, session: AsyncSession):
@@ -24,6 +27,7 @@ class UserService:
         new_user = User(**user_data_dict)
         # TODO: Hash the password before saving
         new_user.password_hash = generate_password_hash(user_data_dict['password'])
+        new_user.role = 'user'
 
         session.add(new_user)
         await session.commit()
