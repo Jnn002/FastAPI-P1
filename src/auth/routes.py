@@ -2,10 +2,13 @@ from datetime import datetime, timedelta, timezone
 
 from fastapi import APIRouter, Depends, status
 from fastapi.responses import JSONResponse
+from sqlmodel.ext.asyncio.session import AsyncSession
 
+from src.config import Config
 from src.db.main import get_session
 from src.db.redis import add_jti_to_blocklist
-from src.errors import InvalidCredentials, InvalidToken, UserAlreadyExists
+from src.errors import InvalidCredentials, InvalidToken, UserAlreadyExists, UserNotFound
+from src.mail import create_message, mail
 
 from .dependencies import (
     AccessTokenBearer,
@@ -13,9 +16,19 @@ from .dependencies import (
     RoleChecker,
     get_current_userd,
 )
-from .schemas import UserBooksModel, UserCreateModel, UserLoginModel, UserModel
+from .schemas import (
+    EmailModel,
+    UserBooksModel,
+    UserCreateModel,
+    UserLoginModel,
+)
 from .service import UserService
-from .utils import create_access_token, verify_password
+from .utils import (
+    create_access_token,
+    create_url_safe_token,
+    decode_url_safe_token,
+    verify_password,
+)
 
 auth_router = APIRouter()
 user_service = UserService()
@@ -24,9 +37,7 @@ role_checker = RoleChecker(['admin', 'user'])
 REFRESH_TOKEN_EXPIRY = 2
 
 
-@auth_router.post(
-    '/signup', response_model=UserModel, status_code=status.HTTP_201_CREATED
-)
+@auth_router.post('/signup', status_code=status.HTTP_201_CREATED)
 async def create_user_account(user_data: UserCreateModel, session=Depends(get_session)):
     email = user_data.email
 
@@ -35,7 +46,24 @@ async def create_user_account(user_data: UserCreateModel, session=Depends(get_se
         raise UserAlreadyExists()
     else:
         new_user = await user_service.create_user(user_data, session)
-        return new_user
+        token = create_url_safe_token({'email': email})
+        link = f'http://{Config.DOMAIN}/api/0.2.1/auth/verify/{token}'
+
+        html_message = f"""
+        <h1>Welcome to BookWorld</h1>
+        <br/>
+        <p>Thank you for signing up with us. We are glad to have you on board.</p>
+        <p>Please click the <a href="{link}">link</a> below to verify your email address.</p>
+        """
+        message = create_message(
+            recipients=[email], subject='Verify your Email', body=html_message
+        )
+
+        await mail.send_message(message)
+        return {
+            'message': 'Account Created! Please check your email to verify your account',
+            'user': new_user,
+        }
 
 
 @auth_router.post('/login')
@@ -109,4 +137,36 @@ async def revoke_token(
     await add_jti_to_blocklist(jti)
     return JSONResponse(
         content={'message': 'You have logged out'}, status_code=status.HTTP_200_OK
+    )
+
+
+@auth_router.post('/send_mail')
+async def send_mail(emails: EmailModel):
+    html = '<h1>Mail test</h1>'
+    message = create_message(recipients=emails.addresses, subject='Test', body=html)
+    await mail.send_message(message)
+    return {'message': 'Email sent'}
+
+
+@auth_router.get('/verify/{token}')
+async def verify_user_account(token: str, session: AsyncSession = Depends(get_session)):
+    token_data = decode_url_safe_token(token)
+    if token_data is None:
+        raise InvalidToken()
+    user_email = token_data.get('email')
+    user_email = token_data['email']
+
+    if user_email:
+        user = await user_service.get_user_by_email(user_email, session)
+
+        if not user:
+            raise UserNotFound()
+        await user_service.update_user(user, {'is_verified': True}, session)
+
+        return JSONResponse(
+            content={'message': 'Account verified'}, status_code=status.HTTP_200_OK
+        )
+    return JSONResponse(
+        content={'message': 'Somehting went wrong, please try later'},
+        status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
     )
