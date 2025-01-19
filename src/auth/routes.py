@@ -1,13 +1,20 @@
 from datetime import datetime, timedelta, timezone
 
-from fastapi import APIRouter, Depends, status
+from fastapi import APIRouter, BackgroundTasks, Depends, status
 from fastapi.responses import JSONResponse
 from sqlmodel.ext.asyncio.session import AsyncSession
 
+from src.celery_tasks import send_email_tsk
 from src.config import Config
 from src.db.main import get_session
 from src.db.redis import add_jti_to_blocklist
-from src.errors import InvalidCredentials, InvalidToken, UserAlreadyExists, UserNotFound
+from src.errors import (
+    InvalidCredentials,
+    InvalidToken,
+    PasswordsDoNotMatch,
+    UserAlreadyExists,
+    UserNotFound,
+)
 from src.mail import create_message, mail
 
 from .dependencies import (
@@ -18,6 +25,8 @@ from .dependencies import (
 )
 from .schemas import (
     EmailModel,
+    PasswordResetConfirmModel,
+    PasswordResetRequestModel,
     UserBooksModel,
     UserCreateModel,
     UserLoginModel,
@@ -27,6 +36,7 @@ from .utils import (
     create_access_token,
     create_url_safe_token,
     decode_url_safe_token,
+    generate_password_hash,
     verify_password,
 )
 
@@ -37,8 +47,23 @@ role_checker = RoleChecker(['admin', 'user'])
 REFRESH_TOKEN_EXPIRY = 2
 
 
+@auth_router.post('/send_mail')
+async def send_mail(emails: EmailModel):
+    email_list = emails.addresses
+    html = '<h1>Mail test</h1>'
+    subject = 'Welcome to BookWorld'
+
+    send_email_tsk.delay(email_list, subject, html)  # type: ignore
+
+    return {'message': 'Email sent'}
+
+
 @auth_router.post('/signup', status_code=status.HTTP_201_CREATED)
-async def create_user_account(user_data: UserCreateModel, session=Depends(get_session)):
+async def create_user_account(
+    user_data: UserCreateModel,
+    background_tasks: BackgroundTasks,
+    session=Depends(get_session),
+):
     email = user_data.email
 
     user_exists = await user_service.user_exists(email, session)
@@ -49,17 +74,17 @@ async def create_user_account(user_data: UserCreateModel, session=Depends(get_se
         token = create_url_safe_token({'email': email})
         link = f'http://{Config.DOMAIN}/api/0.2.1/auth/verify/{token}'
 
-        html_message = f"""
+        emails = [email]
+        subject = 'Verify Your Email Address'
+        html = f"""
         <h1>Welcome to BookWorld</h1>
         <br/>
         <p>Thank you for signing up with us. We are glad to have you on board.</p>
         <p>Please click the <a href="{link}">link</a> below to verify your email address.</p>
         """
-        message = create_message(
-            recipients=[email], subject='Verify your Email', body=html_message
-        )
 
-        await mail.send_message(message)
+        send_email_tsk.delay(emails, subject, html)  # type: ignore
+
         return {
             'message': 'Account Created! Please check your email to verify your account',
             'user': new_user,
@@ -140,14 +165,6 @@ async def revoke_token(
     )
 
 
-@auth_router.post('/send_mail')
-async def send_mail(emails: EmailModel):
-    html = '<h1>Mail test</h1>'
-    message = create_message(recipients=emails.addresses, subject='Test', body=html)
-    await mail.send_message(message)
-    return {'message': 'Email sent'}
-
-
 @auth_router.get('/verify/{token}')
 async def verify_user_account(token: str, session: AsyncSession = Depends(get_session)):
     token_data = decode_url_safe_token(token)
@@ -168,5 +185,65 @@ async def verify_user_account(token: str, session: AsyncSession = Depends(get_se
         )
     return JSONResponse(
         content={'message': 'Somehting went wrong, please try later'},
+        status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+    )
+
+
+@auth_router.post('/password-reset-request')
+async def password_reset_request(email_data: PasswordResetRequestModel):
+    email = email_data.email
+    token = create_url_safe_token({'email': email})
+    link = f'http://{Config.DOMAIN}/api/0.2.1/auth/password-reset-confirm/{token}'
+
+    html_message = f"""
+    <h1>Reset Your Password</h1>
+    <p>Please click this <a href="{link}">link</a> to Reset Your Password</p>
+    """
+    subject = 'Reset Your Password'
+    message = create_message(recipients=[email], subject=subject, body=html_message)
+
+    await mail.send_message(message)
+
+    return JSONResponse(
+        content={
+            'message': 'Please check your email for instructions to reset your password',
+        },
+        status_code=status.HTTP_200_OK,
+    )
+
+
+@auth_router.post('/password-reset-confirm/{token}')
+async def reset_account_password(
+    token: str,
+    passwords: PasswordResetConfirmModel,
+    session: AsyncSession = Depends(get_session),
+):
+    new_password = passwords.new_password
+    confirm_password = passwords.confirm_new_password
+
+    if new_password != confirm_password:
+        raise PasswordsDoNotMatch()
+
+    token_data = decode_url_safe_token(token)
+
+    if token_data is None:
+        raise InvalidToken()
+    user_email = token_data['email']
+
+    if user_email:
+        user = await user_service.get_user_by_email(user_email, session)
+        if not user:
+            raise UserNotFound()
+
+        passwd_hash = generate_password_hash(new_password)
+        await user_service.update_user(user, {'password_hash': passwd_hash}, session)
+
+        return JSONResponse(
+            content={'message': 'Password reset successfully'},
+            status_code=status.HTTP_200_OK,
+        )
+
+    return JSONResponse(
+        content={'message': 'Something went wrong, please try again'},
         status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
     )
