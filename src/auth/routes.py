@@ -1,4 +1,5 @@
 from datetime import datetime, timedelta, timezone
+from typing import Annotated
 
 from fastapi import APIRouter, BackgroundTasks, Depends, status
 from fastapi.responses import JSONResponse
@@ -65,8 +66,8 @@ async def create_user_account(
     session=Depends(get_session),
 ):
     email = user_data.email
-
     user_exists = await user_service.user_exists(email, session)
+
     if user_exists:
         raise UserAlreadyExists()
     else:
@@ -95,16 +96,13 @@ async def create_user_account(
 async def login_users(login_data: UserLoginModel, session=Depends(get_session)):
     email = login_data.email
     password = login_data.password
-    # consulta a la base de datos
 
     user = await user_service.get_user_by_email(email, session)
 
     if user is not None:
-        # verificar la contraseña que se ingreso con la que esta en la base de datos
         password_valid = verify_password(password, user.password_hash)
 
         if password_valid:
-            # crear el token de acceso
             access_token = create_access_token(
                 user_data={
                     'email': user.email,
@@ -112,7 +110,7 @@ async def login_users(login_data: UserLoginModel, session=Depends(get_session)):
                     'role': user.role,
                 },
             )
-            # crear el token de refresh
+
             refresh_token = create_access_token(
                 user_data={
                     'email': user.email,
@@ -122,7 +120,7 @@ async def login_users(login_data: UserLoginModel, session=Depends(get_session)):
                 refresh=True,
                 expiry=timedelta(days=REFRESH_TOKEN_EXPIRY),
             )
-            # retornar el token de acceso y el token de refresh
+
             return JSONResponse(
                 content={
                     'message': 'Login succesful',
@@ -135,7 +133,9 @@ async def login_users(login_data: UserLoginModel, session=Depends(get_session)):
 
 
 @auth_router.get('/refresh_token')
-async def get_new_access_token(token_details: dict = Depends(RefreshTokenBearer())):
+async def get_new_access_token(
+    token_details: Annotated[dict, Depends(RefreshTokenBearer())],
+):
     expiry_timestamp = token_details['exp']
     if datetime.fromtimestamp(expiry_timestamp, tz=timezone.utc) > datetime.now(
         timezone.utc
@@ -144,10 +144,10 @@ async def get_new_access_token(token_details: dict = Depends(RefreshTokenBearer(
             user_data=token_details['user'], refresh=False
         )
         return JSONResponse(content={'access_token': new_access_token})
+
     raise InvalidToken()
 
 
-# we are getting our current user and their own related books that they have submitted
 @auth_router.get('/me', response_model=UserBooksModel)
 async def get_current_user(user=Depends(get_current_userd)):
     return user
@@ -155,7 +155,8 @@ async def get_current_user(user=Depends(get_current_userd)):
 
 @auth_router.get('/logout')
 async def revoke_token(
-    token_details: dict = Depends(AccessTokenBearer()), _: bool = Depends(role_checker)
+    token_details: Annotated[dict, Depends(AccessTokenBearer())],
+    _: bool = Depends(role_checker),
 ):
     jti = token_details['jti']
 
@@ -166,8 +167,11 @@ async def revoke_token(
 
 
 @auth_router.get('/verify/{token}')
-async def verify_user_account(token: str, session: AsyncSession = Depends(get_session)):
+async def verify_user_account(
+    token: str, session: Annotated[AsyncSession, Depends(get_session)]
+):
     token_data = decode_url_safe_token(token)
+
     if token_data is None:
         raise InvalidToken()
     user_email = token_data.get('email')
@@ -183,6 +187,7 @@ async def verify_user_account(token: str, session: AsyncSession = Depends(get_se
         return JSONResponse(
             content={'message': 'Account verified'}, status_code=status.HTTP_200_OK
         )
+
     return JSONResponse(
         content={'message': 'Somehting went wrong, please try later'},
         status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
@@ -192,6 +197,7 @@ async def verify_user_account(token: str, session: AsyncSession = Depends(get_se
 @auth_router.post('/password-reset-request')
 async def password_reset_request(email_data: PasswordResetRequestModel):
     email = email_data.email
+
     token = create_url_safe_token({'email': email})
     link = f'http://{Config.DOMAIN}/api/0.2.1/auth/password-reset-confirm/{token}'
 
@@ -216,7 +222,7 @@ async def password_reset_request(email_data: PasswordResetRequestModel):
 async def reset_account_password(
     token: str,
     passwords: PasswordResetConfirmModel,
-    session: AsyncSession = Depends(get_session),
+    session: Annotated[AsyncSession, Depends(get_session)],
 ):
     new_password = passwords.new_password
     confirm_password = passwords.confirm_new_password
